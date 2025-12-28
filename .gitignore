@@ -1,0 +1,15 @@
+# --- Các file hệ thống và thư viện rác ---
+node_modules/
+.DS_Store
+dist/
+coverage/
+
+# --- Các file mật (QUAN TRỌNG) ---
+.env
+firebase-admin.json
+serviceAccountKey.json
+
+# --- Các file log lỗi ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
