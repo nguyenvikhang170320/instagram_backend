@@ -1,46 +1,84 @@
 const express = require("express");
-const { db } = require("../firebase");
-const { cloudinary } = require("../cloudinary");
-const upload = require("../middlewares/upload");
+const { db, admin } = require("../firebase");
+const uploadImage = require("../middlewares/upload_image");
 const verifyToken = require("../middlewares/token");
 const router = express.Router();
+const cloudinary = require("cloudinary").v2;
 
-// Cập nhật Profile
-router.put("/update/:userId", verifyToken, async (req, res) => {
-    try {
-        const { userId } = req.params; // ID người dùng muốn sửa (trên URL)
-        const loggedInUserId = req.user.uid; // ID người dùng thực sự (từ Token)
-
-        // ✅ BẢO MẬT: Chặn nếu sửa hồ sơ của người khác
-        if (loggedInUserId !== userId) {
-            return res.status(403).json({
-                success: false,
-                message: "Bạn không có quyền sửa hồ sơ của người khác!"
-            });
-        }
-
-        const { username, fullname, bio, avatar } = req.body;
-        const userRef = db.collection("users").doc(userId);
-
-        // Cập nhật dữ liệu
-        await userRef.update({
-            username: username || "",
-            fullname: fullname || "",
-            bio: bio || "",
-            avatar: avatar || "",
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        res.status(200).json({
-            success: true,
-            message: "Cập nhật hồ sơ thành công"
-        });
-
-    } catch (error) {
-        console.error("🔥 Lỗi cập nhật profile:", error);
-        res.status(500).json({ message: "Lỗi server", error: error.message });
-    }
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+const uploadBufferToCloudinary = (buffer) => {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            {
+                resource_type: "image",
+                folder: "instagram_flutter/avatars",
+            },
+            (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+            }
+        );
+
+        stream.end(buffer);
+    });
+};
+//cập nhật user
+router.put(
+    "/update/:userId",
+    verifyToken,
+    uploadImage.single("avatar"),
+    async (req, res) => {
+        try {
+            const { userId } = req.params;
+            const loggedInUserId = req.user.uid;
+
+            // 1) check quyền trước
+            if (loggedInUserId !== userId) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Bạn không có quyền sửa hồ sơ của người khác!",
+                });
+            }
+
+            const { username, fullname, bio } = req.body;
+
+            const updateData = {
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            };
+
+            // 2) chỉ update field nào client gửi lên
+            if (username !== undefined) updateData.username = username;
+            if (fullname !== undefined) updateData.fullname = fullname;
+            if (bio !== undefined) updateData.bio = bio;
+
+            // 3) chỉ upload cloudinary khi có file avatar
+            if (req.file) {
+                const uploaded = await uploadBufferToCloudinary(req.file.buffer);
+                updateData.avatar = uploaded.secure_url; // URL ảnh
+                // nếu muốn: updateData.avatarPublicId = uploaded.public_id;
+            }
+
+            // 4) update firestore bằng object dữ liệu
+            await db.collection("users").doc(userId).update(updateData);
+
+            return res.status(200).json({
+                success: true,
+                message: "Cập nhật hồ sơ thành công",
+                avatar: updateData.avatar, // có thì trả
+            });
+        } catch (error) {
+            console.error("🔥 Lỗi cập nhật profile:", error);
+            return res
+                .status(500)
+                .json({ success: false, message: "Lỗi server", error: error.message });
+        }
+    }
+);
+
 // 📌 API lấy thông tin user theo userId, load trang profile
 router.get('/:userId', async (req, res) => {
     try {

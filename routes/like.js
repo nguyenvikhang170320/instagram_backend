@@ -32,12 +32,14 @@ router.post("/like", verifyToken, async (req, res) => {
     }
 });
 
-// 2️⃣ Bỏ like bài viết
-router.delete("/unlike", async (req, res) => {
+//  Bỏ like bài viết
+router.delete("/unlike", verifyToken, async (req, res) => {
     try {
-        const { userId, postId } = req.body;
-        if (!userId || !postId) {
-            return res.status(400).json({ error: "Thiếu userId hoặc postId" });
+        const userId = req.user.uid;      // ✅ lấy từ token
+        const { postId } = req.body;      // ✅ client chỉ cần gửi postId
+
+        if (!postId) {
+            return res.status(400).json({ error: "Thiếu postId" });
         }
 
         const likeDocs = await likesCollection
@@ -49,33 +51,13 @@ router.delete("/unlike", async (req, res) => {
             return res.status(400).json({ error: "Bạn chưa like bài viết này" });
         }
 
-        likeDocs.forEach(async (doc) => await doc.ref.delete());
+        await Promise.all(likeDocs.docs.map((d) => d.ref.delete())); // ✅ await đúng
 
-        res.status(200).json({ message: "Đã bỏ like bài viết" });
+        return res.status(200).json({ message: "Đã bỏ like bài viết" });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        return res.status(500).json({ error: error.message });
     }
 });
-
-// 3️⃣ Lấy danh sách like của bài viết (SỬA CODE)
-router.get("/:postId", async (req, res) => {
-    try {
-        const { postId } = req.params;
-        const likesSnapshot = await likesCollection.where("postId", "==", postId).get();
-
-        const likeCount = likesSnapshot.size; // Đếm số lượt like
-
-        if (likesSnapshot.empty) {
-            return res.status(200).json({ likeCount: 0, likes: [] });
-        }
-
-        const likes = likesSnapshot.docs.map((doc) => doc.data().userId);
-        res.status(200).json({ likeCount, likes }); // Trả về cả số lượt like và danh sách userId
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 
 // API lấy danh sách bài viết mà người dùng đã like
 router.get("/user/:userId", async (req, res) => {
@@ -99,5 +81,26 @@ router.get("/user/:userId", async (req, res) => {
         res.status(500).json({ error: "Lỗi server" });
     }
 });
+
+// 3️⃣ Lấy danh sách like của bài viết (SỬA CODE)
+router.get("/:postId", async (req, res) => {
+    try {
+        const { postId } = req.params;
+        const likesSnapshot = await likesCollection.where("postId", "==", postId).get();
+
+        const likeCount = likesSnapshot.size; // Đếm số lượt like
+
+        if (likesSnapshot.empty) {
+            return res.status(200).json({ likeCount: 0, likes: [] });
+        }
+
+        const likes = likesSnapshot.docs.map((doc) => doc.data().userId);
+        res.status(200).json({ likeCount, likes }); // Trả về cả số lượt like và danh sách userId
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
 
 module.exports = router;

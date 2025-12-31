@@ -91,7 +91,6 @@ router.post("/login", [
 
 
 // API Quên mật khẩu
-// API Quên mật khẩu
 router.post("/forgot-password", async (req, res) => {
     const { email } = req.body;
 
@@ -153,6 +152,7 @@ router.post("/forgot-password", async (req, res) => {
     }
 });
 
+// API đổi mật khẩu
 router.post("/reset-password", async (req, res) => {
     const { email, newPassword, otp } = req.body;
 
@@ -176,8 +176,9 @@ router.post("/reset-password", async (req, res) => {
         // Cập nhật mật khẩu
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         await user.ref.update({ password: hashedPassword, resetOtp: "", otpExpiresAt: "" });
-        console.log(`✅ Mật khẩu đã mã hóa: ${hashedPassword}`);
         console.log(`✅ Mật khẩu chưa mã hóa: ${newPassword}`);
+        console.log(`✅ Mật khẩu đã mã hóa: ${hashedPassword}`);
+
 
         // Trả về thông báo thành công
         return res.status(200).json({ message: "Mật khẩu đã được thay đổi thành công!" });

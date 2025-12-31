@@ -1,7 +1,7 @@
 const express = require("express");
 const cloudinary = require("cloudinary").v2;
 const router = express.Router();
-const { db } = require("../firebase");
+const { db, admin } = require("../firebase");
 const upload = require("../middlewares/upload");
 const verifyToken = require("../middlewares/token");
 require("dotenv").config();
@@ -88,7 +88,7 @@ router.delete("/:postId", verifyToken, async (req, res) => {
         const { postId } = req.params;
         const userId = req.user.uid; // ID của người đang đăng nhập
 
-        const postRef = db.collection("videos").doc(postId); // Giả sử bạn lưu video/post chung ở collection 'videos'
+        const postRef = db.collection("post").doc(postId);
         const doc = await postRef.get();
 
         // 1. Kiểm tra bài viết có tồn tại không

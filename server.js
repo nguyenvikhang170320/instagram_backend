@@ -77,6 +77,48 @@ app.use((err, req, res, next) => {
         error: err.message
     });
 });
+app.use((err, req, res, next) => {
+    // multer file size
+    if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+            return res.status(413).json({
+                success: false,
+                message: "File quá lớn. Tối đa 100MB.",
+            });
+        }
+        return res.status(400).json({ success: false, message: err.message });
+    }
+
+    // fileFilter error: new Error("Chỉ được phép upload file video!")
+    if (err) {
+        return res.status(400).json({ success: false, message: err.message });
+    }
+
+    next();
+});
+
+const multer = require("multer");
+
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+            const isVideo = req.originalUrl.includes("/video/");
+            return res.status(413).json({
+                success: false,
+                message: isVideo
+                    ? "Video quá lớn. Tối đa 100MB."
+                    : "Ảnh quá lớn. Tối đa 5MB.",
+            });
+        }
+        return res.status(400).json({ success: false, message: err.message });
+    }
+
+    if (err) {
+        return res.status(400).json({ success: false, message: err.message });
+    }
+
+    next();
+});
 
 // --- 6. KHỞI CHẠY SERVER ---
 const PORT = process.env.PORT || 5000;
