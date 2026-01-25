@@ -17,12 +17,24 @@ async function uploadToCloudinary(buffer) {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         resource_type: "video",
-        chunk_size: 6000000,
         folder: "instagram_flutter/watch",
+
+        // ✅ Cấu hình để upload file lớn an toàn
+        chunk_size: 6000000, // 6MB mỗi chunk (quan trọng cho mạng yếu)
+        timeout: 600000,     // <--- TĂNG LÊN 10 PHÚT (600,000ms) để chờ convert xong
+
+        // ✅ Cấu hình chuẩn hóa Video (Chống lỗi màn hình đen trên Android)
+        format: "mp4",
+        video_codec: "auto", // Để auto hoặc h264 đều được, auto sẽ tối ưu hơn
+        audio_codec: "aac",
       },
       (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
+        if (error) {
+          console.error("❌ Cloudinary Upload Error:", error);
+          reject(error);
+        } else {
+          resolve(result.secure_url);
+        }
       }
     );
 
@@ -30,17 +42,15 @@ async function uploadToCloudinary(buffer) {
   });
 }
 
-// ✅ Upload video (denormalize username/avatar)
+// ✅ Upload video (Sửa lại phần trả về JSON)
 router.post("/upload", verifyToken, uploadVideo.single("video"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ success: false, message: "No file" });
-
+    if (!req.file) return res.status(400).json({ success: false, message: "Không tìm thấy file video" });
 
     const db = admin.firestore();
     const userId = req.user.uid;
     const { caption } = req.body;
 
-    // lấy user để lưu kèm username/avatar
     const userDoc = await db.collection("users").doc(userId).get();
     const u = userDoc.exists ? userDoc.data() : null;
 
@@ -53,13 +63,15 @@ router.post("/upload", verifyToken, uploadVideo.single("video"), async (req, res
       userId,
       caption: caption || "",
       videoUrl,
-      username, // denormalize
-      avatar,   // denormalize
+      username,
+      avatar,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    // --- Sửa ở đây: Thêm message thông báo ---
     return res.json({
       success: true,
+      message: "Đăng video thành công!", // Thêm dòng này
       videoId: docRef.id,
       videoUrl,
     });
@@ -69,61 +81,10 @@ router.post("/upload", verifyToken, uploadVideo.single("video"), async (req, res
   }
 });
 
-// ✅ Feed videos: trả kèm username/avatar (fallback join cho video cũ)
-router.get("/videos", async (req, res) => {
-  try {
-    const db = admin.firestore();
 
-    const snap = await db.collection("videos").orderBy("createdAt", "desc").get();
-    if (snap.empty) return res.json({ success: true, videos: [] });
-
-    const rawVideos = snap.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        caption: data.caption || "",
-        videoUrl: data.videoUrl || "",
-        userId: data.userId || "",
-        username: data.username || null, // có thể null nếu video cũ
-        avatar: data.avatar || null,     // có thể null nếu video cũ
-        createdAt: data.createdAt ? data.createdAt.toDate().toISOString() : null,
-      };
-    });
-
-    // những video chưa có username/avatar thì join users
-    const needJoin = rawVideos.filter((v) => !v.username || v.avatar === null);
-    if (needJoin.length === 0) {
-      return res.json({ success: true, videos: rawVideos });
-    }
-
-    const userIds = [...new Set(needJoin.map((v) => v.userId).filter(Boolean))];
-    const userRefs = userIds.map((uid) => db.collection("users").doc(uid));
-    const userDocs = userRefs.length ? await db.getAll(...userRefs) : [];
-
-    const userMap = {};
-    for (const d of userDocs) {
-      const u = d.exists ? d.data() : null;
-      userMap[d.id] = {
-        username: u?.username || "Người dùng hệ thống",
-        avatar: u?.avatar || "",
-      };
-    }
-
-    const videos = rawVideos.map((v) => ({
-      ...v,
-      username: v.username || userMap[v.userId]?.username || "Người dùng hệ thống",
-      avatar: v.avatar ?? userMap[v.userId]?.avatar ?? "",
-    }));
-
-    return res.json({ success: true, videos });
-  } catch (error) {
-    console.error("🔥 Lỗi lấy danh sách video:", error);
-    return res.status(500).json({ success: false, message: "Lỗi server" });
-  }
-});
 
 // ✅ Videos theo userId (gộp user; nếu video đã denormalize thì vẫn OK)
-router.get("/videos/:userId", async (req, res) => {
+router.get("/videos/:userId", verifyToken, async (req, res) => {
   const { userId } = req.params;
 
   try {

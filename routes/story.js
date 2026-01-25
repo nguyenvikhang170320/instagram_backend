@@ -14,34 +14,40 @@ cloudinary.config({
     api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-
-// 1. Đăng Story (Đã tối ưu với Promise và userId từ Token)
+// ==========================================
+// 1. ĐĂNG STORY (Có tính thời gian hết hạn 24h)
+// ==========================================
 router.post("/upload", verifyToken, upload.single("image"), async (req, res) => {
-    const userId = req.user.uid; // Lấy từ Token
+    const userId = req.user.uid; // Lấy an toàn từ Token
 
     try {
         if (!req.file) return res.status(400).json({ error: "Không có file được tải lên!" });
 
-        console.log("📤 Đang upload story cho user:", userId);
-
-        // Bọc Cloudinary vào Promise để xử lý mượt mà hơn
+        // Upload lên Cloudinary
         const result = await new Promise((resolve, reject) => {
-            cloudinary.uploader.upload_stream(
+            const stream = cloudinary.uploader.upload_stream(
                 { folder: "instagram_flutter/stories" },
                 (error, result) => {
                     if (error) reject(error);
                     else resolve(result);
                 }
-            ).end(req.file.buffer);
+            );
+            stream.end(req.file.buffer);
         });
 
         const storyId = uuidv4();
+        const now = admin.firestore.Timestamp.now();
+        // Tính thời gian hết hạn (24 giờ sau)
+        const expiresAt = admin.firestore.Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000);
+
         const newStory = {
             storyId,
             userId,
             imageUrl: result.secure_url,
+            publicId: result.public_id, // Lưu cái này để sau này xóa ảnh trên Cloudinary
             viewers: [],
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            createdAt: now,
+            expiresAt: expiresAt, // Quan trọng: dùng để lọc story cũ
         };
 
         await db.collection("stories").doc(storyId).set(newStory);
@@ -54,19 +60,34 @@ router.post("/upload", verifyToken, upload.single("image"), async (req, res) => 
     }
 });
 
-// 2. Lấy danh sách Story (Đã tối ưu tốc độ truy vấn user)
-router.get("/list", async (req, res) => {
+// ==========================================
+// 2. LẤY DANH SÁCH STORY (FEED)
+// Logic: Chỉ lấy story chưa hết hạn (expiresAt > now)
+// ==========================================
+router.get("/list", verifyToken, async (req, res) => {
     try {
-        const snapshot = await db.collection("stories").orderBy("createdAt", "desc").get();
+        const now = admin.firestore.Timestamp.now();
+
+        // Query: Lấy stories chưa hết hạn, sắp xếp mới nhất
+        // LƯU Ý: Bạn cần tạo Index trong Firestore Console cho (expiresAt ASC, createdAt DESC)
+        const snapshot = await db.collection("stories")
+            .where("expiresAt", ">", now)
+            .orderBy("expiresAt", "asc") 
+            .orderBy("createdAt", "desc")
+            .get();
+
         let groupedStories = {};
-        let userCache = {}; // Dùng để tránh truy vấn lại 1 user nhiều lần
+        let userCache = {}; 
 
         for (let doc of snapshot.docs) {
             let story = doc.data();
             let userId = story.userId;
 
+            // Optional: Logic lọc theo Follow (Chỉ hiện story của người mình follow)
+            // Nếu bạn có list following trong req.user, hãy check ở đây.
+            // if (!myFollowingList.includes(userId) && userId !== req.user.uid) continue;
+
             if (!groupedStories[userId]) {
-                // Kiểm tra xem đã lấy info user này chưa
                 if (!userCache[userId]) {
                     const userDoc = await db.collection("users").doc(userId).get();
                     userCache[userId] = userDoc.exists ? userDoc.data() : { username: "Unknown", avatar: "" };
@@ -84,83 +105,128 @@ router.get("/list", async (req, res) => {
                 storyId: doc.id,
                 imageUrl: story.imageUrl,
                 createdAt: story.createdAt,
+                isViewed: story.viewers ? story.viewers.includes(req.user.uid) : false, // Check xem mình xem chưa
                 viewersCount: story.viewers ? story.viewers.length : 0
             });
         }
         res.json(Object.values(groupedStories));
     } catch (error) {
-        console.error("Lỗi lấy danh sách stories:", error);
+        console.error("❌ Lỗi lấy danh sách stories:", error);
         res.status(500).json({ error: "Lỗi server" });
     }
 });
 
-
-// 📌 Đánh dấu người dùng đã xem Story (Lưu vào danh sách viewers)
-router.post("/:storyId/view", async (req, res) => {
+// ==========================================
+// 3. XEM STORY (Đánh dấu đã xem)
+// Sửa lỗi: Lấy userId từ token, không lấy từ body
+// ==========================================
+router.post("/:storyId/view", verifyToken, async (req, res) => {
     try {
         const { storyId } = req.params;
-        const { userId } = req.body;
-
-        if (!userId) {
-            return res.status(400).json({ error: "Thiếu userId" });
-        }
+        const userId = req.user.uid; // Lấy từ Token (Bảo mật)
 
         const storyRef = db.collection("stories").doc(storyId);
-        const storyDoc = await storyRef.get();
+        
+        // Dùng update để tối ưu, không cần get() trước nếu không cần thiết
+        await storyRef.update({
+            viewers: admin.firestore.FieldValue.arrayUnion(userId),
+        });
+
+        res.json({ success: true, message: "Đã đánh dấu xem story" });
+    } catch (error) {
+        console.error("❌ Lỗi khi cập nhật viewers:", error);
+        res.status(500).json({ error: "Lỗi server" });
+    }
+});
+
+// ==========================================
+// 4. LẤY CHI TIẾT NGƯỜI ĐÃ XEM (Chỉ chủ Story mới xem được)
+// ==========================================
+router.get("/:storyId/viewers", verifyToken, async (req, res) => {
+    try {
+        const { storyId } = req.params;
+        const currentUserId = req.user.uid;
+
+        const storyDoc = await db.collection("stories").doc(storyId).get();
 
         if (!storyDoc.exists) {
             return res.status(404).json({ error: "Story không tồn tại" });
         }
 
-        await storyRef.update({
-            viewers: admin.firestore.FieldValue.arrayUnion(userId),
-        });
-        console.log("Story: " + storyRef);
-        console.log("Story: " + storyDoc);
-        res.json({ success: true, message: "Đã thêm vào danh sách viewers" });
+        const storyData = storyDoc.data();
+
+        // BẢO MẬT: Chỉ chủ sở hữu story mới được xem danh sách người xem
+        if (storyData.userId !== currentUserId) {
+            return res.status(403).json({ error: "Bạn không có quyền xem danh sách này" });
+        }
+
+        const viewers = storyData.viewers || [];
+        if (viewers.length === 0) return res.json([]);
+
+        // Lấy thông tin user (giới hạn 50 người mới nhất để đỡ lag)
+        const viewerDetails = await Promise.all(
+            viewers.slice(0, 50).map(async (uid) => {
+                const userDoc = await db.collection("users").doc(uid).get();
+                if (!userDoc.exists) return null;
+                const uData = userDoc.data();
+                return {
+                    userId: uid,
+                    username: uData.username || "Unknown",
+                    avatar: uData.avatar || "",
+                    fullname: uData.fullname || ""
+                };
+            })
+        );
+
+        res.json(viewerDetails.filter(user => user !== null));
     } catch (error) {
-        console.error("🔥 Lỗi khi cập nhật viewers:", error);
+        console.error("❌ Lỗi lấy viewers:", error);
         res.status(500).json({ error: "Lỗi server" });
     }
 });
 
-// 📌 Lấy danh sách người đã xem Story
-// router.get("/:storyId/viewers", async (req, res) => {
-//     try {
-//         const { storyId } = req.params;
-//         const storyDoc = await db.collection("stories").doc(storyId).get();
+// ==========================================
+// 5. XÓA STORY (Chủ story xóa trước 24h)
+// ==========================================
+// ==========================================
+// 5. XÓA STORY (Updated: Bỏ qua lỗi Cloudinary nếu mạng lag)
+// ==========================================
+router.delete("/:storyId", verifyToken, async (req, res) => {
+    try {
+        const { storyId } = req.params;
+        const currentUserId = req.user.uid;
 
-//         if (!storyDoc.exists) {
-//             return res.status(404).json({ error: "Story không tồn tại" });
-//         }
+        const storyRef = db.collection("stories").doc(storyId);
+        const storyDoc = await storyRef.get();
 
-//         const storyData = storyDoc.data();
-//         const viewers = storyData.viewers || [];
+        if (!storyDoc.exists) return res.status(404).json({ error: "Story không tồn tại" });
 
-//         if (viewers.length === 0) {
-//             return res.json([]); // Không có ai xem
-//         }
+        const storyData = storyDoc.data();
 
-//         // 🔥 Lấy thông tin tối đa 100 người xem
-//         const viewerDetails = await Promise.all(
-//             viewers.slice(0, 100).map(async (userId) => {
-//                 const userDoc = await db.collection("users").doc(userId).get();
-//                 if (!userDoc.exists) return null;
+        // Kiểm tra quyền sở hữu
+        if (storyData.userId !== currentUserId) {
+            return res.status(403).json({ error: "Không có quyền xóa story này" });
+        }
 
-//                 const userData = userDoc.data();
-//                 return {
-//                     userId,
-//                     username: userData.username || "Unknown",
-//                     avatar: userData.avatar || "",
-//                 };
-//             })
-//         );
+        // 1. Cố gắng xóa ảnh trên Cloudinary (Bọc trong try-catch riêng)
+        if (storyData.publicId) {
+            try {
+                await cloudinary.uploader.destroy(storyData.publicId);
+                console.log("✅ Đã xóa ảnh trên Cloudinary");
+            } catch (cloudError) {
+                // Nếu lỗi mạng, chỉ log ra chứ không chặn quy trình
+                console.error("⚠️ Lỗi kết nối Cloudinary (bỏ qua):", cloudError.message);
+            }
+        }
 
-//         res.json(viewerDetails.filter(user => user !== null));
-//     } catch (error) {
-//         console.error("🔥 Lỗi lấy viewers:", error);
-//         res.status(500).json({ error: "Lỗi server" });
-//     }
-// });
+        // 2. Xóa trong Database (Luôn thực hiện dù Cloudinary có lỗi hay không)
+        await storyRef.delete();
+
+        res.json({ success: true, message: "Đã xóa story" });
+    } catch (error) {
+        console.error("❌ Lỗi xóa story:", error);
+        res.status(500).json({ error: "Lỗi server" });
+    }
+});
 
 module.exports = router;
