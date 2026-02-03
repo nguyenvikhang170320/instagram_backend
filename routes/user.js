@@ -1,6 +1,6 @@
 const express = require("express");
 const { db, admin } = require("../firebase");
-const uploadImage = require("../middlewares/upload_image");
+const uploadImage = require("../middlewares/upload");
 const verifyToken = require("../middlewares/token");
 const router = express.Router();
 const cloudinary = require("cloudinary").v2;

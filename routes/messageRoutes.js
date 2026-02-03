@@ -2,37 +2,127 @@ const express = require('express');
 const router = express.Router();
 const admin = require('firebase-admin');
 const { db } = require('../firebase');
+const upload = require("../middlewares/upload");
 const verifyToken = require('../middlewares/token');
+const cloudinary = require("cloudinary").v2;
 
-// POST /api/messages/send - Gửi tin nhắn
-router.post('/send', verifyToken, async (req, res) => {
+// cloudinary.config({
+//     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+//     api_key: process.env.CLOUDINARY_API_KEY,
+//     api_secret: process.env.CLOUDINARY_API_SECRET,
+// });
+// POST /api/messages/send - Gửi tin nhắn text
+router.post('/send-text', verifyToken, async (req, res) => {
   try {
     const senderId = req.user.uid;
     const { chatId, text } = req.body;
 
-    if (!chatId || !text) return res.status(400).json({ message: "Thiếu dữ liệu" });
+    if (!chatId) {
+      return res.status(400).json({ message: 'Thiếu chatId' });
+    }
 
-    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: 'Thiếu nội dung tin nhắn' });
+    }
 
-    // 1. Thêm tin nhắn vào collection messages
-    const messageRef = await db.collection('messages').add({
+    const timestamp = new Date();
+
+    const messageData = {
       chatId,
       senderId,
       text,
-      createdAt: timestamp
-    });
+      type: 'text',
+      mediaUrl: null,
+      status: 'sent',
+      createdAt: timestamp,
+    };
 
-    // 2. Cập nhật lastMessage ở bảng chats để danh sách chat nhảy lên đầu
+    const messageRef = await db.collection('messages').add(messageData);
+
     await db.collection('chats').doc(chatId).update({
       lastMessage: text,
-      updatedAt: timestamp
+      updatedAt: timestamp,
     });
 
-    res.status(201).json({ success: true, messageId: messageRef.id });
+    res.status(201).json({
+      id: messageRef.id,
+      ...messageData,
+      createdAt: new Date().toISOString(),
+    });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// POST /api/messages/send - Gửi tin nhắn image/video
+// gửi tin nhắn ảnh / video
+router.post(
+  "/send-media",
+  verifyToken,
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
+
+      const senderId = req.user.uid;
+      const { chatId } = req.body;
+
+      if (!chatId) {
+        return res.status(400).json({ message: "Thiếu chatId" });
+      }
+
+      const type = "image"; // ✅ FIX
+
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          {
+            resource_type: "image",
+            folder: "instagram_flutter/chat",
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        ).end(req.file.buffer);
+      });
+
+      const timestamp = new Date();
+
+      const messageData = {
+        chatId,
+        senderId,
+        text: "",
+        type,
+        mediaUrl: result.secure_url,
+        status: "sent",
+        createdAt: timestamp,
+      };
+
+      const messageRef = await db.collection("messages").add(messageData);
+
+      await db.collection("chats").doc(chatId).update({
+        lastMessage: "[image]",
+        updatedAt: timestamp,
+      });
+
+      res.status(201).json({
+        id: messageRef.id,
+        ...messageData,
+        createdAt: timestamp.toISOString(),
+      });
+
+    } catch (error) {
+      console.error(error); // 👈 nên có
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+
 
 // GET /api/messages/:chatId - Lấy lịch sử tin nhắn
 router.get('/:chatId', verifyToken, async (req, res) => {
