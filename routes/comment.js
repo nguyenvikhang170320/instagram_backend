@@ -1,120 +1,102 @@
 const express = require("express");
 const router = express.Router();
-const { db } = require("../firebase");
-const verifyToken = require("../middlewares/token");
-const { FieldValue } = require("firebase-admin/firestore");
+const admin = require("firebase-admin");
+
+const db = admin.firestore();
 
 
-router.post("/comment", verifyToken, async (req, res) => {
-    try {
-        // Lấy userId từ Token (req.user do verifyToken cung cấp)
-        const userId = req.user.uid;
-        const { postId, commentText } = req.body;
-        if (!postId || !userId || !commentText) {
-            return res.status(400).json({ message: "Thiếu dữ liệu đầu vào!" });
-        }
+// ============================
+// ADD COMMENT
+// ============================
+router.post("/", async (req, res) => {
+  try {
+    const { postId, userId, commentText } = req.body;
 
-        // Tạo document reference trước để lấy ID
-        const commentRef = db.collection("comments").doc();
-        const commentId = commentRef.id; // ✅ Lấy document ID làm commentId
-
-        const newComment = {
-            commentId, // ✅ Lưu luôn commentId vào Firestore
-            postId,
-            userId,
-            commentText,
-            createdAt: FieldValue.serverTimestamp()
-        };
-
-        await commentRef.set(newComment); // ✅ Lưu dữ liệu với commentId
-
-        res.status(201).json(newComment); // ✅ Trả về commentId trong response
-    } catch (error) {
-        res.status(500).json({ message: "Lỗi server!", error });
+    if (!postId || !userId || !commentText) {
+      return res.status(400).json({ message: "Missing fields" });
     }
+
+    const postRef = db.collection("posts").doc(postId);
+    const commentRef = postRef.collection("comments").doc();
+
+    await db.runTransaction(async (transaction) => {
+      const postDoc = await transaction.get(postRef);
+
+      if (!postDoc.exists) {
+        throw new Error("Post not found");
+      }
+
+      transaction.set(commentRef, {
+        commentId: commentRef.id,
+        userId,
+        commentText,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      transaction.update(postRef, {
+        commentCount: admin.firestore.FieldValue.increment(1),
+      });
+    });
+
+    res.status(201).json({ success: true });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 
-// API lấy danh sách bình luận theo postId
-router.get("/comments/:postId", async (req, res) => {
-    try {
-        const postId = req.params.postId;
-        const commentsSnapshot = await db.collection("comments")
-            .where("postId", "==", postId)
-            .orderBy("createdAt", "desc") // Nên thêm sắp xếp
-            .get();
+// ============================
+// DELETE COMMENT
+// ============================
+router.delete("/:postId/:commentId", async (req, res) => {
+  try {
+    const { postId, commentId } = req.params;
 
-        let comments = [];
-        let userCache = {}; // ✅ Cache để tránh đọc 1 user nhiều lần
+    const postRef = db.collection("posts").doc(postId);
+    const commentRef = postRef.collection("comments").doc(commentId);
 
-        for (let doc of commentsSnapshot.docs) {
-            let commentData = doc.data();
-            let cUserId = commentData.userId;
+    await db.runTransaction(async (transaction) => {
+      transaction.delete(commentRef);
 
-            if (!userCache[cUserId]) {
-                let userSnapshot = await db.collection("users").doc(cUserId).get();
-                if (userSnapshot.exists) {
-                    userCache[cUserId] = userSnapshot.data();
-                } else {
-                    userCache[cUserId] = { username: "Người dùng Facebook", avatar: "" };
-                }
-            }
+      transaction.update(postRef, {
+        commentCount: admin.firestore.FieldValue.increment(-1),
+      });
+    });
 
-            comments.push({
-                commentId: commentData.commentId,
-                username: userCache[cUserId].username || "",
-                avatar: userCache[cUserId].avatar || "",
-                commentText: commentData.commentText,
-                createdAt: commentData.createdAt
-            });
-        }
-        res.status(200).json(comments);
-    } catch (error) {
-        res.status(500).json({ message: "Lỗi khi lấy bình luận!", error: error.message });
-    }
+    res.status(200).json({ success: true });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 
+// ============================
+// GET COMMENTS LIST
+// ============================
+router.get("/:postId", async (req, res) => {
+  try {
+    const { postId } = req.params;
 
-// API lấy số lượng bình luận theo postId
-router.get("/comments/count/:postId", async (req, res) => {
-    try {
-        const { postId } = req.params;
-        const commentsSnapshot = await db.collection("comments").where("postId", "==", postId).get();
-        const commentCount = commentsSnapshot.size; // Lấy số lượng comment
+    const snapshot = await db
+      .collection("posts")
+      .doc(postId)
+      .collection("comments")
+      .orderBy("createdAt", "desc")
+      .limit(30)
+      .get();
 
-        res.status(200).json({ postId, commentCount });
-    } catch (error) {
-        res.status(500).json({ message: "Lỗi server!", error });
-    }
+    const comments = snapshot.docs.map(doc => ({
+      ...doc.data(),
+      createdAt: doc.data().createdAt?.toDate()?.toISOString()
+    }));
+
+    res.json(comments);
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
-
-// Xóa bình luận từ collection "comments"
-router.delete("/comments/delete/:commentId", verifyToken, async (req, res) => {
-    try {
-        const { commentId } = req.params;
-        const userId = req.user.uid; // ✅ Lấy UID từ token an toàn
-
-        const commentRef = db.collection("comments").doc(commentId);
-        const commentDoc = await commentRef.get();
-
-        if (!commentDoc.exists) {
-            return res.status(404).json({ error: "Bình luận không tồn tại!" });
-        }
-
-        const commentData = commentDoc.data();
-
-        // ✅ Kiểm tra chủ sở hữu an toàn hơn
-        if (commentData.userId !== userId) {
-            return res.status(403).json({ error: "Bạn không có quyền xóa bình luận này!" });
-        }
-
-        await commentRef.delete();
-        res.status(200).json({ message: "Xóa bình luận thành công" });
-    } catch (error) {
-        res.status(500).json({ error: "Lỗi khi xóa bình luận", details: error.message });
-    }
-});
-
 
 module.exports = router;

@@ -42,7 +42,7 @@ app.use('/api/messages', require('./routes/messageRoutes'));
 app.use("/api", require("./routes/save"));
 app.use("/api", require("./routes/unsave"));
 app.use("/api", require("./routes/savedPosts"));
-app.use("/api", require("./routes/report"));
+app.use("/api/report", require("./routes/report"));
 app.use("/api/video", require("./routes/watch"));
 app.use('/api/verify-request', require('./routes/verifyRequest'));
 
